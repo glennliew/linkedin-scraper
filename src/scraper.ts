@@ -261,6 +261,10 @@ function parseProjects(text: string): ProjectEntry[]
 
 /**
  * Parses volunteering entries from the markdown text.
+ * Handles multiple formats:
+ * - "Role at [Organization](url)"
+ * - "Role at Organization"
+ * - Just "[Organization](url)" or "Organization" (role defaults to "Volunteer")
  * @param text - The full profile markdown text
  * @returns Array of volunteer entry objects
  */
@@ -278,31 +282,46 @@ function parseVolunteering(text: string): VolunteerEntry[]
     const volSection = volSectionMatch[1];
 
     // Split by volunteer entries
-    const entries = volSection.split(/- (?:###|\*\*) /).filter((e) => e.trim());
+    const entries = volSection.split(/- ### /).filter((e) => e.trim());
 
     for (const entry of entries)
     {
-        // Extract role and organization - handle both linked and plain formats
-        // Pattern: "Role at [Organization](url)" or "Role at Organization"
-        const linkedMatch = entry.match(/^(.+?) at \[([^\]]+)\]\((https:\/\/[^\)]+)\)/);
-        const plainMatch = entry.match(/^(.+?) at ([^\n]+)/);
-
         let role = "";
         let organization = "";
         let organizationUrl: string | undefined;
 
-        if (linkedMatch)
+        // Format 1: "Role at [Organization](url)"
+        const linkedWithRoleMatch = entry.match(/^(.+?) at \[([^\]]+)\]\((https?:\/\/[^\)]+)\)/);
+        // Format 2: "Role at Organization"
+        const plainWithRoleMatch = entry.match(/^(.+?) at ([^\n]+)/);
+        // Format 3: Just "[Organization](url)" - no role specified
+        const linkedOnlyMatch = entry.match(/^\[([^\]]+)\]\((https?:\/\/[^\)]*)\)/);
+        // Format 4: Just "Organization Name" on first line
+        const plainOnlyMatch = entry.match(/^([^\n\[]+)/);
+
+        if (linkedWithRoleMatch)
         {
-            role = linkedMatch[1].trim();
-            organization = linkedMatch[2].trim();
-            organizationUrl = linkedMatch[3];
-        } else if (plainMatch)
+            role = linkedWithRoleMatch[1].trim();
+            organization = linkedWithRoleMatch[2].trim();
+            organizationUrl = linkedWithRoleMatch[3];
+        } else if (plainWithRoleMatch)
         {
-            role = plainMatch[1].trim().replace(/\*\*/g, "");
-            organization = plainMatch[2].trim();
+            role = plainWithRoleMatch[1].trim().replace(/\*\*/g, "");
+            organization = plainWithRoleMatch[2].trim();
+        } else if (linkedOnlyMatch)
+        {
+            // Organization only - default role to "Volunteer"
+            organization = linkedOnlyMatch[1].trim();
+            organizationUrl = linkedOnlyMatch[2] || undefined;
+            role = "Volunteer";
+        } else if (plainOnlyMatch)
+        {
+            // Organization only - default role to "Volunteer"
+            organization = plainOnlyMatch[1].trim().replace(/\*\*/g, "");
+            role = "Volunteer";
         }
 
-        if (!role || !organization)
+        if (!organization)
         {
             continue;
         }
@@ -311,9 +330,8 @@ function parseVolunteering(text: string): VolunteerEntry[]
         const causeMatch = entry.match(/(?:Cause|Focus):\s*([^\n]+)/i);
         const cause = causeMatch ? causeMatch[1].trim() : undefined;
 
-        // Extract date range
-        const dateMatch = entry.match(/(\d{4})\s*[-–]\s*(\d{4}|Present)/i) ||
-            entry.match(/(?:Date|Duration):\s*([^\n]+)/i);
+        // Extract date range - handle formats like "Feb 2013 - Present" or "2013 - Present"
+        const dateMatch = entry.match(/([A-Z][a-z]{2,8}\s+)?\d{4}\s*[-–]\s*(?:[A-Z][a-z]{2,8}\s+)?\d{4}|([A-Z][a-z]{2,8}\s+)?\d{4}\s*[-–]\s*Present/i);
         const dateRange = dateMatch ? dateMatch[0].trim() : undefined;
 
         volunteering.push({
@@ -483,6 +501,7 @@ export async function scrapeLinkedInProfile(url: string): Promise<ProfileData>
             interests,
             url,
             image,
+            rawText: text, // Include raw Exa markdown for debugging
         };
 
         console.log("Exa scraping complete.");
