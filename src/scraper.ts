@@ -1,41 +1,25 @@
 import Exa from "exa-js";
 import { EducationEntry, ProfileData, ProjectEntry, VolunteerEntry } from "./types";
 
-const exa = new Exa(process.env.EXASEARCH_API_KEY);
+/** Lazily initialized Exa client instance */
+let exaClient: Exa | null = null;
 
 /**
- * Extracts LinkedIn URLs from markdown text.
- * @param text - The markdown text to parse
- * @returns Object containing arrays of company and school URLs
+ * Gets or creates the Exa client instance.
+ * @returns The Exa client
+ * @throws Error if EXASEARCH_API_KEY is not set
  */
-function extractLinkedInUrls(text: string): {
-    companyUrls: string[];
-    schoolUrls: string[];
-}
+function getExaClient(): Exa
 {
-    const companyUrls: string[] = [];
-    const schoolUrls: string[] = [];
-
-    // Regex to find LinkedIn company and school URLs in markdown link format
-    const urlRegex = /\[([^\]]+)\]\((https:\/\/(?:www\.)?linkedin\.com\/(?:company|school)\/[^\)]+)\)/g;
-
-    let match: RegExpExecArray | null;
-    while ((match = urlRegex.exec(text)) !== null)
+    if (!exaClient)
     {
-        const url = match[2];
-        if (url.includes("/company/"))
+        if (!process.env.EXASEARCH_API_KEY)
         {
-            companyUrls.push(url);
-        } else if (url.includes("/school/"))
-        {
-            schoolUrls.push(url);
+            throw new Error("EXASEARCH_API_KEY is missing in .env file.");
         }
+        exaClient = new Exa(process.env.EXASEARCH_API_KEY);
     }
-
-    return {
-        companyUrls: [...new Set(companyUrls)], // Remove duplicates
-        schoolUrls: [...new Set(schoolUrls)],
-    };
+    return exaClient;
 }
 
 /**
@@ -444,10 +428,7 @@ export async function scrapeLinkedInProfile(url: string): Promise<ProfileData>
 {
     console.log(`Starting Exa scrape for: ${url}`);
 
-    if (!process.env.EXASEARCH_API_KEY)
-    {
-        throw new Error("EXASEARCH_API_KEY is missing in .env file.");
-    }
+    const exa = getExaClient();
 
     try
     {
@@ -501,7 +482,7 @@ export async function scrapeLinkedInProfile(url: string): Promise<ProfileData>
             skills,
             interests,
             url,
-            image
+            image,
         };
 
         console.log("Exa scraping complete.");

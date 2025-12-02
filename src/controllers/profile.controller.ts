@@ -36,12 +36,21 @@ export const scrapeProfile = async (
 
         // 1. Scrape the profile using Exa
         const profile = await scraperService.scrapeProfile(linkedinUrl);
+        logger.info(`Profile scraped successfully: ${profile.name}`);
 
         // 2. Extract keywords using OpenAI
         const keywords = await intelligenceService.extractKeywords(profile);
+        logger.info(`Keywords extracted: ${keywords.length} keywords`);
 
-        // 3. Generate embedding vector
+        // 3. Generate embedding vector (handles empty keywords gracefully)
         const embedding = await intelligenceService.generateEmbedding(keywords);
+        if (embedding.length > 0)
+        {
+            logger.info(`Embedding generated: ${embedding.length} dimensions`);
+        } else
+        {
+            logger.warn("No embedding generated (keywords may be empty)");
+        }
 
         // 4. Build the result object
         const result = {

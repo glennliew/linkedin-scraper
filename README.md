@@ -87,15 +87,6 @@ curl -X POST http://localhost:3000/api/v1/profile/scrape \
 }
 ```
 
-## CLI Usage
-
-You can also run the scraper directly from the command line:
-
-```bash
-npm start "https://www.linkedin.com/in/username/"
-```
-
-This saves the result to `result.json`.
 
 ## Tech Stack
 

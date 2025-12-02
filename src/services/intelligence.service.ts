@@ -94,10 +94,17 @@ export class IntelligenceService
     /**
      * Generates an embedding vector for the given keywords using OpenAI.
      * @param keywords - Array of keywords to embed
-     * @returns Promise resolving to the embedding vector
+     * @returns Promise resolving to the embedding vector, or empty array if no keywords
      */
     async generateEmbedding(keywords: string[]): Promise<number[]>
     {
+        // Handle empty keywords array
+        if (keywords.length === 0)
+        {
+            console.warn("No keywords provided for embedding generation. Returning empty vector.");
+            return [];
+        }
+
         console.log("Generating embedding for keywords...");
 
         const textToEmbed = keywords.join(" ");

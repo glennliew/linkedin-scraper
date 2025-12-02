@@ -78,9 +78,15 @@ export interface ProfileData
     rawText?: string;
 }
 
+/**
+ * Complete result from the scraping pipeline including profile, keywords, and embedding.
+ */
 export interface ScraperResult
 {
+    /** The scraped profile data */
     profile: ProfileData;
+    /** Extracted professional keywords */
     keywords: string[];
+    /** Vector embedding for similarity matching */
     embedding: number[];
 }
