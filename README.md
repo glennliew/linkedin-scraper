@@ -87,7 +87,6 @@ curl -X POST http://localhost:3000/api/v1/profile/scrape \
 }
 ```
 
-
 ## Tech Stack
 
 - **Exa API** - LinkedIn profile scraping

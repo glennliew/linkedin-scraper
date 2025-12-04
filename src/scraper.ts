@@ -1,8 +1,14 @@
 import Exa from "exa-js";
-import { EducationEntry, ProfileData, ProjectEntry, VolunteerEntry } from "./types";
+import OpenAI from "openai";
+import { zodResponseFormat } from "openai/helpers/zod";
+import { ProfileParserSchema, ParsedProfile } from "./schemas/profile-parser.schema";
+import { ProfileData } from "./types";
 
 /** Lazily initialized Exa client instance */
 let exaClient: Exa | null = null;
+
+/** Lazily initialized OpenAI client instance */
+let openaiClient: OpenAI | null = null;
 
 /**
  * Gets or creates the Exa client instance.
@@ -23,424 +29,86 @@ function getExaClient(): Exa
 }
 
 /**
- * Parses work experience from the markdown text.
- * @param text - The full profile markdown text
- * @returns Array of work experience strings (e.g., "Title at Company")
+ * Gets or creates the OpenAI client instance.
+ * @returns The OpenAI client
+ * @throws Error if OPENAI_API_KEY is not set
  */
-function parseWorkExperience(text: string): string[]
+function getOpenAIClient(): OpenAI
 {
-    const experiences: string[] = [];
-
-    // Look for work experience section with various possible headers
-    const workSectionMatch = text.match(/## (?:Work Experience|Experience)\n([\s\S]*?)(?=\n## |$)/i);
-    if (!workSectionMatch)
+    if (!openaiClient)
     {
-        return experiences;
-    }
-
-    const workSection = workSectionMatch[1];
-
-    // Split by experience entries (starting with - ###)
-    const entries = workSection.split(/- ### /).filter((e) => e.trim());
-
-    for (const entry of entries)
-    {
-        // Extract title and company - handle both linked and plain text formats
-        const linkedMatch = entry.match(/^(.+?) at \[([^\]]+)\]\(([^\)]+)\)/);
-        const plainMatch = entry.match(/^(.+?) at ([^\n]+)/);
-
-        if (linkedMatch)
+        if (!process.env.OPENAI_API_KEY)
         {
-            const title = linkedMatch[1].trim();
-            const company = linkedMatch[2].trim();
-            experiences.push(`${title} at ${company}`);
-        } else if (plainMatch)
-        {
-            const title = plainMatch[1].trim();
-            const company = plainMatch[2].trim();
-            experiences.push(`${title} at ${company}`);
+            throw new Error("OPENAI_API_KEY is missing in .env file.");
         }
+        openaiClient = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
     }
-
-    return experiences;
+    return openaiClient;
 }
 
 /**
- * Parses education entries from the markdown text.
- * Handles Exa markdown format: ### Degree || Field at [School](url)
- * @param text - The full profile markdown text
- * @returns Array of education entry objects
+ * System prompt for the LLM profile parser.
+ * Instructs the model to extract structured profile data from raw markdown text.
  */
-function parseEducation(text: string): EducationEntry[]
+const PROFILE_PARSER_SYSTEM_PROMPT = `You are an expert LinkedIn profile data extractor. Your task is to extract structured information from raw LinkedIn profile markdown text.
+
+Instructions:
+1. Extract all profile fields accurately from the provided markdown text.
+2. Clean up any markdown formatting (remove brackets, parentheses from links, etc.) - return clean text values.
+3. For education entries:
+   - Extract the school name without any markdown syntax
+   - Separate degree and field of study if both are present
+   - Include LinkedIn URLs if available
+4. For work experience:
+   - Format as "Title at Company" strings
+5. For projects and volunteering:
+   - Extract all available details (name, description, dates, etc.)
+6. If a section is not present in the text, return an empty array for that field.
+7. If a field's value cannot be determined, use an empty string for required string fields.
+8. Do NOT include any markdown syntax in the output values.
+9. For URLs, extract only valid URLs (starting with http:// or https://).
+
+Be thorough and extract all available information from the profile.`;
+
+/**
+ * Parses LinkedIn profile data from raw markdown text using OpenAI LLM.
+ * Uses structured outputs with Zod schema for type-safe extraction.
+ * @param rawText - The raw markdown text from Exa
+ * @returns Promise resolving to the parsed profile fields
+ * @throws Error if OpenAI API call fails or parsing fails
+ */
+async function parseProfileWithLLM(rawText: string): Promise<ParsedProfile>
 {
-    const education: EducationEntry[] = [];
+    console.log("Parsing profile with LLM...");
 
-    // Look for education section
-    const eduSectionMatch = text.match(/## Education\n([\s\S]*?)(?=\n## |$)/i);
-    if (!eduSectionMatch)
+    const openai = getOpenAIClient();
+
+    const completion = await openai.beta.chat.completions.parse({
+        model: "gpt-4o-mini",
+        messages: [
+            { role: "system", content: PROFILE_PARSER_SYSTEM_PROMPT },
+            { role: "user", content: rawText },
+        ],
+        response_format: zodResponseFormat(ProfileParserSchema, "profile"),
+    });
+
+    const parsed = completion.choices[0].message.parsed;
+
+    if (!parsed)
     {
-        return education;
+        throw new Error("Failed to parse profile data from LLM response");
     }
 
-    const eduSection = eduSectionMatch[1];
+    console.log("LLM parsing complete.");
 
-    // Split by education entries (starting with ### or - ###)
-    const entries = eduSection.split(/(?:^|\n)(?:-\s*)?###\s+/).filter((e) => e.trim());
-
-    for (const entry of entries)
-    {
-        let school = "";
-        let schoolUrl: string | undefined;
-        let degree: string | undefined;
-        let fieldOfStudy: string | undefined;
-        let dateRange: string | undefined;
-
-        // Format 1: "Degree || Field at [School](url)" or "Degree at [School](url)"
-        // This matches the work experience format
-        const linkedFormatMatch = entry.match(/^(.+?)\s+at\s+\[([^\]]+)\]\(([^\)]*)\)/);
-        if (linkedFormatMatch)
-        {
-            const degreeAndField = linkedFormatMatch[1].trim();
-            school = linkedFormatMatch[2].trim();
-            schoolUrl = linkedFormatMatch[3] || undefined;
-
-            // Parse degree and field - may be separated by "||" or ","
-            if (degreeAndField.includes("||"))
-            {
-                const parts = degreeAndField.split("||").map((p) => p.trim());
-                degree = parts[0];
-                fieldOfStudy = parts.slice(1).join(", ");
-            } else if (degreeAndField.includes(","))
-            {
-                const parts = degreeAndField.split(",").map((p) => p.trim());
-                degree = parts[0];
-                fieldOfStudy = parts.slice(1).join(", ");
-            } else
-            {
-                degree = degreeAndField;
-            }
-        } else
-        {
-            // Format 2: "Degree at School" (plain text, no link)
-            const plainFormatMatch = entry.match(/^(.+?)\s+at\s+([^\n\[]+)/);
-            if (plainFormatMatch)
-            {
-                const degreeAndField = plainFormatMatch[1].trim();
-                school = plainFormatMatch[2].trim();
-
-                if (degreeAndField.includes("||"))
-                {
-                    const parts = degreeAndField.split("||").map((p) => p.trim());
-                    degree = parts[0];
-                    fieldOfStudy = parts.slice(1).join(", ");
-                } else if (degreeAndField.includes(","))
-                {
-                    const parts = degreeAndField.split(",").map((p) => p.trim());
-                    degree = parts[0];
-                    fieldOfStudy = parts.slice(1).join(", ");
-                } else
-                {
-                    degree = degreeAndField;
-                }
-            } else
-            {
-                // Format 3: Just "[School](url)" with degree on next line
-                const schoolOnlyMatch = entry.match(/^\[([^\]]+)\]\(([^\)]*)\)/);
-                if (schoolOnlyMatch)
-                {
-                    school = schoolOnlyMatch[1].trim();
-                    schoolUrl = schoolOnlyMatch[2] || undefined;
-
-                    // Look for degree in subsequent lines
-                    const restOfEntry = entry.slice(schoolOnlyMatch[0].length);
-                    const lines = restOfEntry.split("\n").map((l) => l.trim()).filter((l) => l);
-                    for (const line of lines)
-                    {
-                        if (!degree && line.length > 2 && !line.match(/^[-•\d]/))
-                        {
-                            const parts = line.split(/[,|]/).map((p) => p.trim()).filter((p) => p);
-                            degree = parts[0];
-                            if (parts.length > 1)
-                            {
-                                fieldOfStudy = parts.slice(1).join(", ");
-                            }
-                            break;
-                        }
-                    }
-                } else
-                {
-                    // Format 4: Plain text school name
-                    const plainSchoolMatch = entry.match(/^([^\n]+)/);
-                    if (plainSchoolMatch)
-                    {
-                        school = plainSchoolMatch[1].trim();
-                    }
-                }
-            }
-        }
-
-        if (!school)
-        {
-            continue;
-        }
-
-        // Extract date range from the full entry
-        const dateMatch = entry.match(/(\d{4})\s*[-–]\s*(\d{4}|Present)/i);
-        if (dateMatch)
-        {
-            dateRange = dateMatch[0];
-        }
-
-        education.push({
-            school,
-            degree,
-            fieldOfStudy,
-            dateRange,
-            schoolUrl: schoolUrl && schoolUrl.length > 0 ? schoolUrl : undefined,
-        });
-    }
-
-    return education;
+    return parsed;
 }
 
 /**
- * Parses project entries from the markdown text.
- * @param text - The full profile markdown text
- * @returns Array of project entry objects
- */
-function parseProjects(text: string): ProjectEntry[]
-{
-    const projects: ProjectEntry[] = [];
-
-    // Look for projects section
-    const projectSectionMatch = text.match(/## Projects?\n([\s\S]*?)(?=\n## |$)/i);
-    if (!projectSectionMatch)
-    {
-        return projects;
-    }
-
-    const projectSection = projectSectionMatch[1];
-
-    // Split by project entries
-    const entries = projectSection.split(/- (?:###|\*\*) /).filter((e) => e.trim());
-
-    for (const entry of entries)
-    {
-        // Extract project name
-        const nameMatch = entry.match(/^([^\n\[]+)/) || entry.match(/^\[([^\]]+)\]/);
-        const name = nameMatch ? nameMatch[1].trim().replace(/\*\*/g, "") : "";
-
-        if (!name)
-        {
-            continue;
-        }
-
-        // Extract description (usually follows the name)
-        const descMatch = entry.match(/\n\s*([^-\n][^\n]+)/);
-        const description = descMatch ? descMatch[1].trim() : undefined;
-
-        // Extract date range
-        const dateMatch = entry.match(/(\d{4})\s*[-–]\s*(\d{4}|Present)/i) ||
-            entry.match(/(?:Date|Duration):\s*([^\n]+)/i);
-        const dateRange = dateMatch ? dateMatch[0].trim() : undefined;
-
-        // Extract associated company/organization
-        const assocMatch = entry.match(/(?:Associated with|At|For):\s*\[?([^\]\n]+)\]?/i);
-        const associatedWith = assocMatch ? assocMatch[1].trim() : undefined;
-
-        projects.push({
-            name,
-            description,
-            dateRange,
-            associatedWith,
-        });
-    }
-
-    return projects;
-}
-
-/**
- * Parses volunteering entries from the markdown text.
- * Handles multiple formats:
- * - "Role at [Organization](url)"
- * - "Role at Organization"
- * - Just "[Organization](url)" or "Organization" (role defaults to "Volunteer")
- * @param text - The full profile markdown text
- * @returns Array of volunteer entry objects
- */
-function parseVolunteering(text: string): VolunteerEntry[]
-{
-    const volunteering: VolunteerEntry[] = [];
-
-    // Look for volunteering section (various possible headers)
-    const volSectionMatch = text.match(/## (?:Volunteer(?:ing)?|Volunteer Experience)\n([\s\S]*?)(?=\n## |$)/i);
-    if (!volSectionMatch)
-    {
-        return volunteering;
-    }
-
-    const volSection = volSectionMatch[1];
-
-    // Split by volunteer entries
-    const entries = volSection.split(/- ### /).filter((e) => e.trim());
-
-    for (const entry of entries)
-    {
-        let role = "";
-        let organization = "";
-        let organizationUrl: string | undefined;
-
-        // Format 1: "Role at [Organization](url)"
-        const linkedWithRoleMatch = entry.match(/^(.+?) at \[([^\]]+)\]\((https?:\/\/[^\)]+)\)/);
-        // Format 2: "Role at Organization"
-        const plainWithRoleMatch = entry.match(/^(.+?) at ([^\n]+)/);
-        // Format 3: Just "[Organization](url)" - no role specified
-        const linkedOnlyMatch = entry.match(/^\[([^\]]+)\]\((https?:\/\/[^\)]*)\)/);
-        // Format 4: Just "Organization Name" on first line
-        const plainOnlyMatch = entry.match(/^([^\n\[]+)/);
-
-        if (linkedWithRoleMatch)
-        {
-            role = linkedWithRoleMatch[1].trim();
-            organization = linkedWithRoleMatch[2].trim();
-            organizationUrl = linkedWithRoleMatch[3];
-        } else if (plainWithRoleMatch)
-        {
-            role = plainWithRoleMatch[1].trim().replace(/\*\*/g, "");
-            organization = plainWithRoleMatch[2].trim();
-        } else if (linkedOnlyMatch)
-        {
-            // Organization only - default role to "Volunteer"
-            organization = linkedOnlyMatch[1].trim();
-            organizationUrl = linkedOnlyMatch[2] || undefined;
-            role = "Volunteer";
-        } else if (plainOnlyMatch)
-        {
-            // Organization only - default role to "Volunteer"
-            organization = plainOnlyMatch[1].trim().replace(/\*\*/g, "");
-            role = "Volunteer";
-        }
-
-        if (!organization)
-        {
-            continue;
-        }
-
-        // Extract cause
-        const causeMatch = entry.match(/(?:Cause|Focus):\s*([^\n]+)/i);
-        const cause = causeMatch ? causeMatch[1].trim() : undefined;
-
-        // Extract date range - handle formats like "Feb 2013 - Present" or "2013 - Present"
-        const dateMatch = entry.match(/([A-Z][a-z]{2,8}\s+)?\d{4}\s*[-–]\s*(?:[A-Z][a-z]{2,8}\s+)?\d{4}|([A-Z][a-z]{2,8}\s+)?\d{4}\s*[-–]\s*Present/i);
-        const dateRange = dateMatch ? dateMatch[0].trim() : undefined;
-
-        volunteering.push({
-            role,
-            organization,
-            cause,
-            dateRange,
-            organizationUrl,
-        });
-    }
-
-    return volunteering;
-}
-
-/**
- * Parses skills from the markdown text.
- * @param text - The full profile markdown text
- * @returns Array of skill strings
- */
-function parseSkills(text: string): string[]
-{
-    const skills: string[] = [];
-
-    // Look for skills section
-    const skillsSectionMatch = text.match(/## Skills?\n([\s\S]*?)(?=\n## |$)/i);
-    if (!skillsSectionMatch)
-    {
-        return skills;
-    }
-
-    const skillsSection = skillsSectionMatch[1];
-
-    // Skills can be listed as:
-    // - Bullet points: "- Skill Name"
-    // - Numbered: "1. Skill Name"
-    // - Comma-separated
-    // - New lines
-
-    // Try bullet/numbered list format first
-    const bulletMatches = skillsSection.matchAll(/[-•*]\s*([^\n]+)/g);
-    for (const match of bulletMatches)
-    {
-        const skill = match[1].trim().replace(/\*\*/g, "");
-        if (skill && !skill.startsWith("#"))
-        {
-            skills.push(skill);
-        }
-    }
-
-    // If no bullet items found, try comma-separated or newline-separated
-    if (skills.length === 0)
-    {
-        const lines = skillsSection.split(/[,\n]/).map((s) => s.trim()).filter((s) => s && !s.startsWith("#"));
-        skills.push(...lines);
-    }
-
-    // Remove duplicates and empty entries
-    return [...new Set(skills)].filter((s) => s.length > 0);
-}
-
-/**
- * Parses interests from the markdown text (companies, groups, schools, influencers followed).
- * @param text - The full profile markdown text
- * @returns Array of interest strings
- */
-function parseInterests(text: string): string[]
-{
-    const interests: string[] = [];
-
-    // Look for interests section (various possible headers)
-    const interestsSectionMatch = text.match(/## (?:Interests?|Following|Groups?|Companies? Followed)\n([\s\S]*?)(?=\n## |$)/i);
-    if (!interestsSectionMatch)
-    {
-        return interests;
-    }
-
-    const interestsSection = interestsSectionMatch[1];
-
-    // Extract names from linked items: [Name](url) or bullet points
-    const linkedMatches = interestsSection.matchAll(/\[([^\]]+)\]\([^\)]+\)/g);
-    for (const match of linkedMatches)
-    {
-        const interest = match[1].trim();
-        if (interest)
-        {
-            interests.push(interest);
-        }
-    }
-
-    // Also try bullet point format
-    const bulletMatches = interestsSection.matchAll(/[-•*]\s*([^\n\[]+)/g);
-    for (const match of bulletMatches)
-    {
-        const interest = match[1].trim().replace(/\*\*/g, "");
-        if (interest && !interest.startsWith("#"))
-        {
-            interests.push(interest);
-        }
-    }
-
-    // Remove duplicates
-    return [...new Set(interests)];
-}
-
-/**
- * Scrapes a LinkedIn profile using the Exa API.
+ * Scrapes a LinkedIn profile using the Exa API and parses it with LLM.
  * @param url - The LinkedIn profile URL to scrape
  * @returns Promise resolving to the parsed profile data
- * @throws Error if EXASEARCH_API_KEY is missing or if scraping fails
+ * @throws Error if EXASEARCH_API_KEY/OPENAI_API_KEY is missing or if scraping fails
  */
 export async function scrapeLinkedInProfile(url: string): Promise<ProfileData>
 {
@@ -450,7 +118,7 @@ export async function scrapeLinkedInProfile(url: string): Promise<ProfileData>
 
     try
     {
-        // 1. Fetch the LinkedIn profile content
+        // 1. Fetch the LinkedIn profile content from Exa
         const result = await exa.getContents([url], { text: true });
 
         if (!result.results || result.results.length === 0)
@@ -459,57 +127,34 @@ export async function scrapeLinkedInProfile(url: string): Promise<ProfileData>
         }
 
         const profileData = result.results[0];
-        const text = profileData.text || "";
-        const name = profileData.author || "";
+        const rawText = profileData.text || "";
         const image = profileData.image || undefined;
 
-        // 2. Extract bio/about section (handle various header formats)
-        const aboutMatch = text.match(/## (?:About me|About|Summary)\n([\s\S]*?)(?=\n## |$)/i);
-        const about = aboutMatch?.[1]?.trim() || "";
+        // 2. Parse the profile using LLM with structured outputs
+        const parsed = await parseProfileWithLLM(rawText);
 
-        // 3. Extract headline (usually the line after the name or first line of text)
-        // Exa text structure varies, but often starts with Name\nHeadline
-        const lines = text.split("\n").filter((l) => l.trim());
-        let headline = "";
-        // Simple heuristic: if the first line is the name, the second might be the headline
-        if (lines.length > 1 && lines[0].includes(name))
-        {
-            headline = lines[1].trim();
-        } else
-        {
-            headline = lines[0].trim(); // Fallback
-        }
-
-        // 4. Parse all profile sections
-        const experience = parseWorkExperience(text);
-        const education = parseEducation(text);
-        const projects = parseProjects(text);
-        const volunteering = parseVolunteering(text);
-        const skills = parseSkills(text);
-        const interests = parseInterests(text);
-
-        // 5. Construct the profile data object
+        // 3. Construct the profile data object
         const data: ProfileData = {
-            name,
-            headline,
-            about,
-            experience,
-            education,
-            projects,
-            volunteering,
-            skills,
-            interests,
+            name: parsed.name,
+            headline: parsed.headline,
+            about: parsed.about,
+            experience: parsed.experience,
+            education: parsed.education,
+            projects: parsed.projects,
+            volunteering: parsed.volunteering,
+            skills: parsed.skills,
+            interests: parsed.interests,
             url,
             image,
-            rawText: text, // Include raw Exa markdown for debugging
+            rawText, // Include raw Exa markdown for debugging
         };
 
         console.log("Exa scraping complete.");
-        console.log(`  - Education entries: ${education.length}`);
-        console.log(`  - Projects: ${projects.length}`);
-        console.log(`  - Volunteering entries: ${volunteering.length}`);
-        console.log(`  - Skills: ${skills.length}`);
-        console.log(`  - Interests: ${interests.length}`);
+        console.log(`  - Education entries: ${data.education.length}`);
+        console.log(`  - Projects: ${data.projects.length}`);
+        console.log(`  - Volunteering entries: ${data.volunteering.length}`);
+        console.log(`  - Skills: ${data.skills.length}`);
+        console.log(`  - Interests: ${data.interests.length}`);
 
         return data;
     } catch (error)
